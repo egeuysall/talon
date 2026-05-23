@@ -5,7 +5,7 @@ const crons = cronJobs();
 
 crons.interval(
   "talon employee loop",
-  { seconds: 30 },
+  { minutes: 1 },
   internal.agentLoop.runDueAgents,
   {},
 );

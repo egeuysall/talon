@@ -37,10 +37,81 @@ export const runOneLoopNow = action({
       throw new Error("Admin access required.");
     }
 
+    const context = await ctx.runQuery(internal.records.getAgentContext, {
+      orgId,
+      employeeId: args.employeeId,
+    });
+    if (!context.state) {
+      throw new Error("Agent not found.");
+    }
+
     return await ctx.runAction(internal.agentLoop.run, {
       orgId,
       employeeId: args.employeeId,
     });
+  },
+});
+
+export const runApprovedAction = action({
+  args: {
+    employeeId: v.string(),
+    approvalId: v.id("approvalRequests"),
+  },
+  handler: async (ctx, args): Promise<{ outcome: string }> => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error("Unauthorized");
+    }
+    const orgId = orgScope(identity);
+    const orgRole = claimString(identity.org_role) ?? claimString(identity.orgRole);
+    const inPersonalScope = orgId.startsWith("user:");
+    if (!inPersonalScope && !isAdminRole(orgRole)) {
+      throw new Error("Admin access required.");
+    }
+
+    const approval = await ctx.runMutation(
+      internal.records.takeApprovalForExecution,
+      {
+        orgId,
+        employeeId: args.employeeId,
+        approvalId: args.approvalId,
+        decidedBy: identity.tokenIdentifier,
+        now: Date.now(),
+      },
+    );
+
+    try {
+      const outcome: string = await ctx.runAction(internal.tools.execute, {
+        orgId,
+        employeeId: args.employeeId,
+        loopId: approval.loopId,
+        action: JSON.parse(approval.action),
+      });
+      const status = /^[^:]+:\s*(error|skipped)\b/i.test(outcome)
+        ? "rejected"
+        : "executed";
+      await ctx.runMutation(internal.records.markApprovalExecuted, {
+        orgId,
+        employeeId: args.employeeId,
+        approvalId: args.approvalId,
+        result: outcome,
+        status,
+        now: Date.now(),
+      });
+      return { outcome };
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Approved action failed.";
+      await ctx.runMutation(internal.records.markApprovalExecuted, {
+        orgId,
+        employeeId: args.employeeId,
+        approvalId: args.approvalId,
+        result: message,
+        status: "rejected",
+        now: Date.now(),
+      });
+      throw error;
+    }
   },
 });
 

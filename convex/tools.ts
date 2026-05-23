@@ -8,8 +8,13 @@ import { internal } from "./_generated/api";
 
 const actionType = v.union(
   v.literal("RUN_RUNBOOK"),
+  v.literal("INSPECT_GITHUB"),
   v.literal("COMMENT_GITHUB"),
+  v.literal("OPEN_GITHUB_ISSUE"),
+  v.literal("LABEL_GITHUB_ISSUE"),
+  v.literal("CLOSE_GITHUB_ISSUE"),
   v.literal("OPEN_GITHUB_PR"),
+  v.literal("REQUEST_GITHUB_REVIEW"),
   v.literal("MERGE_GITHUB_PR"),
   v.literal("SEND_SLACK"),
   v.literal("ESCALATE"),
@@ -31,9 +36,26 @@ const nextAction = v.object({
 
 type ToolStatus = "success" | "skipped" | "error";
 type GitHubRepo = { full_name?: string };
+type GitHubIssueDetail = {
+  number?: number;
+  title?: string;
+  state?: string;
+  html_url?: string;
+  labels?: Array<{ name?: string }>;
+  assignees?: Array<{ login?: string }>;
+};
+type GitHubPullDetail = GitHubIssueDetail & {
+  mergeable?: boolean | null;
+  draft?: boolean;
+  head?: { ref?: string; sha?: string };
+  base?: { ref?: string };
+};
 
 const GITHUB_API_VERSION = "2022-11-28";
 const USER_AGENT = "talon-autonomous-employee";
+const REPO_FULL_NAME_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const GIT_REF_RE = /^[A-Za-z0-9._/@-]{1,120}$/;
+const GITHUB_NAME_RE = /^[A-Za-z0-9-]{1,39}$/;
 
 function env(name: string) {
   const value = process.env[name];
@@ -42,6 +64,28 @@ function env(name: string) {
 
 function safeMessage(error: unknown) {
   return error instanceof Error ? error.message : "Unknown error";
+}
+
+function requireRepoFullName(repoFullName: string) {
+  if (!REPO_FULL_NAME_RE.test(repoFullName)) {
+    throw new Error("Invalid GitHub repo full name.");
+  }
+  return repoFullName;
+}
+
+function requireGitRef(ref: string) {
+  if (!GIT_REF_RE.test(ref) || ref.startsWith("-")) {
+    throw new Error("Invalid Git ref.");
+  }
+  return ref;
+}
+
+function parseCsv(value: string | undefined, limit: number) {
+  return (value ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .slice(0, limit);
 }
 
 function base64Url(value: Buffer | string) {
@@ -217,11 +261,11 @@ print({
 `;
     }
     case "repo_typescript_checks": {
-      const repoFullName = args.repoFullName;
+      const repoFullName = requireRepoFullName(args.repoFullName ?? "");
       if (!repoFullName) {
         throw new Error("repo_typescript_checks requires args.repoFullName");
       }
-      const ref = args.ref && args.ref.length > 0 ? args.ref : "main";
+      const ref = requireGitRef(args.ref && args.ref.length > 0 ? args.ref : "main");
       const cloneUrl = args.cloneUrl;
       if (!cloneUrl) {
         throw new Error("repo_typescript_checks requires args.cloneUrl");
@@ -238,9 +282,9 @@ ref = ${JSON.stringify(ref)}
 clone_url = ${JSON.stringify(cloneUrl)}
 
 def run(cmd, cwd=None):
-  p = subprocess.run(cmd, cwd=cwd, shell=True, capture_output=True, text=True)
+  p = subprocess.run(cmd, cwd=cwd, shell=False, capture_output=True, text=True)
   return {
-    "cmd": cmd,
+    "cmd": " ".join(cmd),
     "code": p.returncode,
     "stdout": (p.stdout or "")[-3000:],
     "stderr": (p.stderr or "")[-3000:],
@@ -252,7 +296,7 @@ def script_exists(scripts, name):
 work = tempfile.mkdtemp(prefix="talon-repo-")
 target = os.path.join(work, "repo")
 steps = []
-steps.append(run(f"git clone --depth 1 --branch {ref} {clone_url} {target}"))
+steps.append(run(["git", "clone", "--depth", "1", "--branch", ref, clone_url, target]))
 
 if steps[-1]["code"] != 0:
   print(json.dumps({"repo": repo, "ref": ref, "status": "clone_failed", "steps": steps}))
@@ -263,14 +307,14 @@ if not pkg.exists():
   print(json.dumps({"repo": repo, "ref": ref, "status": "no_package_json", "steps": steps}))
   raise SystemExit(0)
 
-steps.append(run("node -v", cwd=target))
-steps.append(run("npm -v", cwd=target))
-steps.append(run("npm ci --ignore-scripts", cwd=target))
+steps.append(run(["node", "-v"], cwd=target))
+steps.append(run(["npm", "-v"], cwd=target))
+steps.append(run(["npm", "ci", "--ignore-scripts"], cwd=target))
 
 if steps[-1]["code"] == 0:
-  steps.append(run("npm run -s typecheck", cwd=target))
-  steps.append(run("npm run -s lint", cwd=target))
-  steps.append(run("npm run -s test", cwd=target))
+  steps.append(run(["npm", "run", "-s", "typecheck"], cwd=target))
+  steps.append(run(["npm", "run", "-s", "lint"], cwd=target))
+  steps.append(run(["npm", "run", "-s", "test"], cwd=target))
 
 print(json.dumps({"repo": repo, "ref": ref, "status": "completed", "steps": steps}))
 `;
@@ -328,12 +372,11 @@ async function executeRunbook(
     const nextArgs = { ...args };
     if (runbookId === "repo_typescript_checks") {
       const token = await createInstallationToken();
-      const repoFullName = args.repoFullName ?? "";
-      if (!repoFullName.includes("/")) {
-        throw new Error("repo_typescript_checks requires args.repoFullName");
-      }
+      const repoFullName = requireRepoFullName(args.repoFullName ?? "");
       nextArgs.repoFullName = repoFullName;
-      nextArgs.ref = args.ref && args.ref.length > 0 ? args.ref : "main";
+      nextArgs.ref = requireGitRef(
+        args.ref && args.ref.length > 0 ? args.ref : "main",
+      );
       const cloneUrl = `https://x-access-token:${token}@github.com/${repoFullName}.git`;
       nextArgs.cloneUrl = cloneUrl;
       secretsToRedact.push(token, cloneUrl);
@@ -399,13 +442,13 @@ async function githubRequest(
 }
 
 async function resolveRepoFullName(token: string, actionArgs: Record<string, string>) {
-  return (
+  const fullName =
     actionArgs.repoFullName ||
     (actionArgs.owner && actionArgs.repo
       ? `${actionArgs.owner}/${actionArgs.repo}`
       : "") ||
-    (await defaultInstalledRepo(token))
-  );
+    (await defaultInstalledRepo(token));
+  return fullName ? requireRepoFullName(fullName) : null;
 }
 
 async function postGitHubComment(
@@ -492,6 +535,257 @@ async function postGitHubComment(
       safeMessage(error),
       startedAt,
     );
+  }
+}
+
+async function inspectGitHub(
+  ctx: ActionCtx,
+  orgId: string,
+  employeeId: string,
+  loopId: string,
+  issueOrPrNumber: number | undefined,
+  actionArgs: Record<string, string>,
+) {
+  const startedAt = Date.now();
+  const token = await createInstallationToken().catch(() => null);
+  if (!token) {
+    return await logToolRun(
+      ctx,
+      orgId,
+      employeeId,
+      loopId,
+      "GitHub",
+      { issueOrPrNumber, ...actionArgs },
+      "skipped",
+      "GitHub inspect skipped because GitHub App env is missing.",
+      "",
+      startedAt,
+    );
+  }
+  const fullName = await resolveRepoFullName(token, actionArgs);
+  if (!fullName) {
+    return await logToolRun(
+      ctx,
+      orgId,
+      employeeId,
+      loopId,
+      "GitHub",
+      { issueOrPrNumber, ...actionArgs },
+      "skipped",
+      "GitHub inspect skipped because no installed repository was found.",
+      "",
+      startedAt,
+    );
+  }
+
+  try {
+    if (issueOrPrNumber) {
+      let detail: GitHubIssueDetail | GitHubPullDetail;
+      let kind = "issue";
+      try {
+        detail = (await githubRequest(
+          `/repos/${fullName}/pulls/${issueOrPrNumber}`,
+          token,
+        )) as GitHubPullDetail;
+        kind = "pull_request";
+      } catch {
+        detail = (await githubRequest(
+          `/repos/${fullName}/issues/${issueOrPrNumber}`,
+          token,
+        )) as GitHubIssueDetail;
+      }
+      return await logToolRun(
+        ctx,
+        orgId,
+        employeeId,
+        loopId,
+        "GitHub",
+        { repoFullName: fullName, issueOrPrNumber },
+        "success",
+        JSON.stringify({
+          kind,
+          number: detail.number,
+          title: detail.title,
+          state: detail.state,
+          url: detail.html_url,
+          labels: detail.labels?.map((label) => label.name).filter(Boolean),
+          assignees: detail.assignees
+            ?.map((assignee) => assignee.login)
+            .filter(Boolean),
+          mergeable:
+            "mergeable" in detail ? detail.mergeable : undefined,
+          draft: "draft" in detail ? detail.draft : undefined,
+        }),
+        "",
+        startedAt,
+      );
+    }
+
+    const [issues, pulls] = await Promise.all([
+      githubRequest(`/repos/${fullName}/issues?state=open&per_page=10`, token),
+      githubRequest(`/repos/${fullName}/pulls?state=open&per_page=10`, token),
+    ]);
+    return await logToolRun(
+      ctx,
+      orgId,
+      employeeId,
+      loopId,
+      "GitHub",
+      { repoFullName: fullName },
+      "success",
+      JSON.stringify({
+        repo: fullName,
+        openIssues: Array.isArray(issues) ? issues.length : 0,
+        openPulls: Array.isArray(pulls) ? pulls.length : 0,
+      }),
+      "",
+      startedAt,
+    );
+  } catch (error) {
+    return await logToolRun(
+      ctx,
+      orgId,
+      employeeId,
+      loopId,
+      "GitHub",
+      { repoFullName: fullName, issueOrPrNumber },
+      "error",
+      "",
+      safeMessage(error),
+      startedAt,
+    );
+  }
+}
+
+async function openGitHubIssue(
+  ctx: ActionCtx,
+  orgId: string,
+  employeeId: string,
+  loopId: string,
+  actionArgs: Record<string, string>,
+) {
+  const startedAt = Date.now();
+  const token = await createInstallationToken().catch(() => null);
+  if (!token) {
+    return await logToolRun(ctx, orgId, employeeId, loopId, "GitHub", actionArgs, "skipped", "GitHub issue open skipped because GitHub App env is missing.", "", startedAt);
+  }
+  const fullName = await resolveRepoFullName(token, actionArgs);
+  const title = actionArgs.title?.trim();
+  if (!fullName || !title) {
+    return await logToolRun(ctx, orgId, employeeId, loopId, "GitHub", actionArgs, "skipped", "OPEN_GITHUB_ISSUE requires repoFullName and args.title.", "", startedAt);
+  }
+
+  try {
+    const payload = await githubRequest(`/repos/${fullName}/issues`, token, {
+      method: "POST",
+      body: {
+        title: title.slice(0, 240),
+        body: (actionArgs.body ?? "Opened by Talon autonomous employee.").slice(0, 6000),
+        labels: parseCsv(actionArgs.labels, 10).map((label) => label.slice(0, 80)),
+      },
+    });
+    const number = (payload as { number?: number }).number ?? "unknown";
+    return await logToolRun(ctx, orgId, employeeId, loopId, "GitHub", actionArgs, "success", `Opened issue #${number} on ${fullName}.`, "", startedAt);
+  } catch (error) {
+    return await logToolRun(ctx, orgId, employeeId, loopId, "GitHub", actionArgs, "error", "", safeMessage(error), startedAt);
+  }
+}
+
+async function labelGitHubIssue(
+  ctx: ActionCtx,
+  orgId: string,
+  employeeId: string,
+  loopId: string,
+  issueOrPrNumber: number | undefined,
+  actionArgs: Record<string, string>,
+) {
+  const startedAt = Date.now();
+  const token = await createInstallationToken().catch(() => null);
+  if (!token) {
+    return await logToolRun(ctx, orgId, employeeId, loopId, "GitHub", { issueOrPrNumber, ...actionArgs }, "skipped", "GitHub label skipped because GitHub App env is missing.", "", startedAt);
+  }
+  const fullName = await resolveRepoFullName(token, actionArgs);
+  const labels = parseCsv(actionArgs.labels, 10).map((label) => label.slice(0, 80));
+  if (!fullName || !issueOrPrNumber || labels.length === 0) {
+    return await logToolRun(ctx, orgId, employeeId, loopId, "GitHub", { issueOrPrNumber, ...actionArgs }, "skipped", "LABEL_GITHUB_ISSUE requires issueOrPrNumber and args.labels.", "", startedAt);
+  }
+
+  try {
+    await githubRequest(`/repos/${fullName}/issues/${issueOrPrNumber}/labels`, token, {
+      method: "POST",
+      body: { labels },
+    });
+    return await logToolRun(ctx, orgId, employeeId, loopId, "GitHub", { issueOrPrNumber, ...actionArgs }, "success", `Added labels to ${fullName}#${issueOrPrNumber}: ${labels.join(", ")}.`, "", startedAt);
+  } catch (error) {
+    return await logToolRun(ctx, orgId, employeeId, loopId, "GitHub", { issueOrPrNumber, ...actionArgs }, "error", "", safeMessage(error), startedAt);
+  }
+}
+
+async function closeGitHubIssue(
+  ctx: ActionCtx,
+  orgId: string,
+  employeeId: string,
+  loopId: string,
+  issueOrPrNumber: number | undefined,
+  actionArgs: Record<string, string>,
+) {
+  const startedAt = Date.now();
+  const token = await createInstallationToken().catch(() => null);
+  if (!token) {
+    return await logToolRun(ctx, orgId, employeeId, loopId, "GitHub", { issueOrPrNumber, ...actionArgs }, "skipped", "GitHub close skipped because GitHub App env is missing.", "", startedAt);
+  }
+  const fullName = await resolveRepoFullName(token, actionArgs);
+  if (!fullName || !issueOrPrNumber) {
+    return await logToolRun(ctx, orgId, employeeId, loopId, "GitHub", { issueOrPrNumber, ...actionArgs }, "skipped", "CLOSE_GITHUB_ISSUE requires issueOrPrNumber.", "", startedAt);
+  }
+
+  try {
+    await githubRequest(`/repos/${fullName}/issues/${issueOrPrNumber}`, token, {
+      method: "PATCH",
+      body: {
+        state: "closed",
+        state_reason: actionArgs.stateReason === "not_planned" ? "not_planned" : "completed",
+      },
+    });
+    return await logToolRun(ctx, orgId, employeeId, loopId, "GitHub", { issueOrPrNumber, ...actionArgs }, "success", `Closed ${fullName}#${issueOrPrNumber}.`, "", startedAt);
+  } catch (error) {
+    return await logToolRun(ctx, orgId, employeeId, loopId, "GitHub", { issueOrPrNumber, ...actionArgs }, "error", "", safeMessage(error), startedAt);
+  }
+}
+
+async function requestGitHubReview(
+  ctx: ActionCtx,
+  orgId: string,
+  employeeId: string,
+  loopId: string,
+  issueOrPrNumber: number | undefined,
+  actionArgs: Record<string, string>,
+) {
+  const startedAt = Date.now();
+  const token = await createInstallationToken().catch(() => null);
+  if (!token) {
+    return await logToolRun(ctx, orgId, employeeId, loopId, "GitHub", { issueOrPrNumber, ...actionArgs }, "skipped", "GitHub review request skipped because GitHub App env is missing.", "", startedAt);
+  }
+  const fullName = await resolveRepoFullName(token, actionArgs);
+  const reviewers = parseCsv(actionArgs.reviewers, 10).filter((reviewer) =>
+    GITHUB_NAME_RE.test(reviewer),
+  );
+  if (!fullName || !issueOrPrNumber || reviewers.length === 0) {
+    return await logToolRun(ctx, orgId, employeeId, loopId, "GitHub", { issueOrPrNumber, ...actionArgs }, "skipped", "REQUEST_GITHUB_REVIEW requires issueOrPrNumber and args.reviewers.", "", startedAt);
+  }
+
+  try {
+    await githubRequest(
+      `/repos/${fullName}/pulls/${issueOrPrNumber}/requested_reviewers`,
+      token,
+      {
+        method: "POST",
+        body: { reviewers },
+      },
+    );
+    return await logToolRun(ctx, orgId, employeeId, loopId, "GitHub", { issueOrPrNumber, ...actionArgs }, "success", `Requested review on ${fullName}#${issueOrPrNumber}: ${reviewers.join(", ")}.`, "", startedAt);
+  } catch (error) {
+    return await logToolRun(ctx, orgId, employeeId, loopId, "GitHub", { issueOrPrNumber, ...actionArgs }, "error", "", safeMessage(error), startedAt);
   }
 }
 
@@ -773,6 +1067,16 @@ export const execute = internalAction({
         action.args ?? {},
       );
     }
+    if (action.type === "INSPECT_GITHUB") {
+      return await inspectGitHub(
+        ctx,
+        args.orgId,
+        args.employeeId,
+        args.loopId,
+        action.issueOrPrNumber,
+        action.args ?? {},
+      );
+    }
     if (action.type === "COMMENT_GITHUB") {
       if (!action.issueOrPrNumber || !action.body) {
         return await logToolRun(
@@ -798,12 +1102,51 @@ export const execute = internalAction({
         action.args ?? {},
       );
     }
+    if (action.type === "OPEN_GITHUB_ISSUE") {
+      return await openGitHubIssue(
+        ctx,
+        args.orgId,
+        args.employeeId,
+        args.loopId,
+        action.args ?? {},
+      );
+    }
+    if (action.type === "LABEL_GITHUB_ISSUE") {
+      return await labelGitHubIssue(
+        ctx,
+        args.orgId,
+        args.employeeId,
+        args.loopId,
+        action.issueOrPrNumber,
+        action.args ?? {},
+      );
+    }
+    if (action.type === "CLOSE_GITHUB_ISSUE") {
+      return await closeGitHubIssue(
+        ctx,
+        args.orgId,
+        args.employeeId,
+        args.loopId,
+        action.issueOrPrNumber,
+        action.args ?? {},
+      );
+    }
     if (action.type === "OPEN_GITHUB_PR") {
       return await openGitHubPr(
         ctx,
         args.orgId,
         args.employeeId,
         args.loopId,
+        action.args ?? {},
+      );
+    }
+    if (action.type === "REQUEST_GITHUB_REVIEW") {
+      return await requestGitHubReview(
+        ctx,
+        args.orgId,
+        args.employeeId,
+        args.loopId,
+        action.issueOrPrNumber,
         action.args ?? {},
       );
     }

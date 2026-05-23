@@ -8,20 +8,31 @@ export const taskStatusSchema = z.enum([
   "queued",
   "in_progress",
   "blocked",
+  "pending_approval",
+  "waiting_external",
+  "follow_up_scheduled",
+  "action_failed",
+  "confidence_low",
   "done",
 ]);
 export const signalSourceSchema = z.enum([
   "github",
   "deployment",
   "slack",
+  "health",
   "self",
 ]);
 
 export const nextActionSchema = z.object({
   type: z.enum([
     "RUN_RUNBOOK",
+    "INSPECT_GITHUB",
     "COMMENT_GITHUB",
+    "OPEN_GITHUB_ISSUE",
+    "LABEL_GITHUB_ISSUE",
+    "CLOSE_GITHUB_ISSUE",
     "OPEN_GITHUB_PR",
+    "REQUEST_GITHUB_REVIEW",
     "MERGE_GITHUB_PR",
     "SEND_SLACK",
     "ESCALATE",

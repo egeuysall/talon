@@ -19,6 +19,11 @@ export default defineSchema({
     lastLoopStartedAt: v.optional(v.number()),
     lastLoopFinishedAt: v.optional(v.number()),
     lastError: v.optional(v.string()),
+    nextRunAt: v.optional(v.number()),
+    lastSignalDigest: v.optional(v.string()),
+    leaseId: v.optional(v.string()),
+    leaseExpiresAt: v.optional(v.number()),
+    failureCount: v.optional(v.number()),
     autonomyMode: v.union(
       v.literal("supervised"),
       v.literal("autonomous"),
@@ -65,6 +70,11 @@ export default defineSchema({
       v.literal("queued"),
       v.literal("in_progress"),
       v.literal("blocked"),
+      v.literal("pending_approval"),
+      v.literal("waiting_external"),
+      v.literal("follow_up_scheduled"),
+      v.literal("action_failed"),
+      v.literal("confidence_low"),
       v.literal("done"),
     ),
     source: v.union(
@@ -75,6 +85,10 @@ export default defineSchema({
       v.literal("self"),
     ),
     rationale: v.string(),
+    nextAttemptAt: v.optional(v.number()),
+    retryCount: v.optional(v.number()),
+    lastError: v.optional(v.string()),
+    externalUrl: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -133,6 +147,16 @@ export default defineSchema({
     title: v.string(),
     summary: v.string(),
     url: v.optional(v.string()),
+    fingerprint: v.optional(v.string()),
+    lastSeenAt: v.optional(v.number()),
+    status: v.optional(
+      v.union(
+        v.literal("new"),
+        v.literal("seen"),
+        v.literal("acted"),
+        v.literal("ignored"),
+      ),
+    ),
     createdAt: v.number(),
   })
     .index("by_source_and_createdAt", ["source", "createdAt"])
@@ -154,8 +178,93 @@ export default defineSchema({
     ),
     key: v.string(),
     content: v.string(),
+    source: v.optional(v.string()),
+    verifiedAt: v.optional(v.number()),
+    staleAfter: v.optional(v.number()),
+    confidence: v.optional(
+      v.union(v.literal("low"), v.literal("medium"), v.literal("high")),
+    ),
     updatedAt: v.number(),
   })
     .index("by_kind_and_key", ["kind", "key"])
     .index("by_orgId_and_kind_and_key", ["orgId", "kind", "key"]),
+
+  approvalRequests: defineTable({
+    orgId: v.string(),
+    employeeId: v.string(),
+    loopId: v.string(),
+    actionType: v.string(),
+    action: v.string(),
+    risk: v.union(v.literal("medium"), v.literal("high")),
+    reason: v.string(),
+    evidence: v.array(v.string()),
+    status: v.union(
+      v.literal("pending"),
+      v.literal("approved"),
+      v.literal("rejected"),
+      v.literal("executed"),
+      v.literal("expired"),
+    ),
+    requestedAt: v.number(),
+    decidedAt: v.optional(v.number()),
+    decidedBy: v.optional(v.string()),
+    result: v.optional(v.string()),
+  })
+    .index("by_orgId_and_employeeId_and_status", [
+      "orgId",
+      "employeeId",
+      "status",
+    ])
+    .index("by_orgId_and_status", ["orgId", "status"]),
+
+  followUps: defineTable({
+    orgId: v.string(),
+    employeeId: v.string(),
+    taskTitle: v.string(),
+    reason: v.string(),
+    dueAt: v.number(),
+    status: v.union(
+      v.literal("scheduled"),
+      v.literal("running"),
+      v.literal("done"),
+      v.literal("blocked"),
+    ),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_orgId_and_employeeId_and_status_and_dueAt", [
+      "orgId",
+      "employeeId",
+      "status",
+      "dueAt",
+    ])
+    .index("by_orgId_and_status_and_dueAt", ["orgId", "status", "dueAt"]),
+
+  memoryInsights: defineTable({
+    orgId: v.string(),
+    employeeId: v.string(),
+    kind: v.union(
+      v.literal("recurring_failure"),
+      v.literal("stale_knowledge"),
+      v.literal("successful_fix"),
+      v.literal("owner_hint"),
+    ),
+    title: v.string(),
+    detail: v.string(),
+    evidence: v.array(v.string()),
+    confidence: v.union(v.literal("low"), v.literal("medium"), v.literal("high")),
+    status: v.union(v.literal("proposed"), v.literal("accepted"), v.literal("dismissed")),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_orgId_and_employeeId_and_createdAt", [
+      "orgId",
+      "employeeId",
+      "createdAt",
+    ])
+    .index("by_orgId_and_employeeId_and_status", [
+      "orgId",
+      "employeeId",
+      "status",
+    ]),
 });

@@ -6,7 +6,7 @@ import { internalAction, type ActionCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 
 type Signal = {
-  source: "github" | "deployment" | "slack" | "self";
+  source: "github" | "deployment" | "slack" | "health" | "self";
   severity: "info" | "warning" | "critical";
   title: string;
   summary: string;
@@ -152,10 +152,18 @@ async function writeSignals(
 ) {
   const now = Date.now();
   for (const signal of signals.slice(0, 30)) {
+    const fingerprint = [
+      signal.source,
+      signal.severity,
+      signal.title,
+      signal.summary,
+      signal.url ?? "",
+    ].join("|");
     await ctx.runMutation(internal.records.insertSignal, {
       ...signal,
       orgId,
       employeeId,
+      fingerprint,
       createdAt: now,
     });
   }
@@ -382,15 +390,78 @@ export const collectSlackSignals = internalAction({
   },
 });
 
+export const collectHealthSignals = internalAction({
+  args: { orgId: v.string(), employeeId: v.string() },
+  handler: async (ctx, args) => {
+    const urls = (env("HEALTHCHECK_URLS") ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean)
+      .slice(0, 10);
+
+    if (urls.length === 0) {
+      const signals: Signal[] = [
+        {
+          source: "health",
+          severity: "warning",
+          title: "Health checks unconfigured",
+          summary:
+            "Set HEALTHCHECK_URLS to comma-separated URLs for live service monitoring.",
+        },
+      ];
+      await writeSignals(ctx, args.orgId, args.employeeId, signals);
+      return signals;
+    }
+
+    const signals: Signal[] = [];
+    for (const url of urls) {
+      const startedAt = Date.now();
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 8000);
+        const res = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeout);
+        const durationMs = Date.now() - startedAt;
+        signals.push({
+          source: "health",
+          severity: res.ok ? "info" : "critical",
+          title: `${new URL(url).host} health ${res.status}`,
+          summary: res.ok
+            ? `Health check passed in ${durationMs}ms.`
+            : `Health check returned ${res.status} ${res.statusText} in ${durationMs}ms.`,
+          url,
+        });
+      } catch (error) {
+        signals.push({
+          source: "health",
+          severity: "critical",
+          title: `${url} health failed`,
+          summary: safeMessage(error),
+          url,
+        });
+      }
+    }
+
+    await writeSignals(ctx, args.orgId, args.employeeId, signals);
+    return signals;
+  },
+});
+
 export const collectAll = internalAction({
   args: { orgId: v.string(), employeeId: v.string() },
   handler: async (ctx, args): Promise<Signal[]> => {
-    const [github, deployment, slack]: [Signal[], Signal[], Signal[]] = await Promise.all([
+    const [github, deployment, slack, health]: [
+      Signal[],
+      Signal[],
+      Signal[],
+      Signal[],
+    ] = await Promise.all([
       ctx.runAction(internal.perception.collectGitHubSignals, args),
       ctx.runAction(internal.perception.collectDeploymentSignals, args),
       ctx.runAction(internal.perception.collectSlackSignals, args),
+      ctx.runAction(internal.perception.collectHealthSignals, args),
     ]);
-    return [...github, ...deployment, ...slack];
+    return [...github, ...deployment, ...slack, ...health];
   },
 });
 
