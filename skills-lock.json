@@ -103,6 +103,12 @@
       "skillPath": "skills/convex-setup-auth/SKILL.md",
       "computedHash": "b1a940758751c5b2fdc6ced105b19927a1655f0c1d4bd2fd5536dc3264202c00"
     },
+    "e2b-sandbox": {
+      "source": "computesdk/sandbox-skills",
+      "sourceType": "github",
+      "skillPath": "skills/e2b-sandbox/SKILL.md",
+      "computedHash": "877bfd1ae9315001122518284cb49d528fe4d37119a9fd08753ce8fe060f279a"
+    },
     "find-skills": {
       "source": "vercel-labs/skills",
       "sourceType": "github",
