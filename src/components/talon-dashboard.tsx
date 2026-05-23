@@ -129,6 +129,7 @@ export function TalonDashboard() {
   });
   const launchEmployee = useMutation(api.records.launchEmployee);
   const rejectApproval = useMutation(api.records.rejectApproval);
+  const runOneLoopNow = useAction(api.dashboard.runOneLoopNow);
   const runApprovedAction = useAction(api.dashboard.runApprovedAction);
   const ensureDefaultEmployee = useMutation(
     api.records.ensureDefaultEmployeeForOrg,
@@ -163,13 +164,14 @@ export function TalonDashboard() {
     if (ensuredScopeId.current === scopeId) return;
     ensuredScopeId.current = scopeId;
     void ensureDefaultEmployee()
-      .then((result) => {
+      .then(async (result) => {
         setSelection({ orgId, employeeId: result.employeeId });
+        await runOneLoopNow({ employeeId: result.employeeId });
       })
       .catch(() => {
         ensuredScopeId.current = null;
       });
-  }, [data, ensureDefaultEmployee, orgId]);
+  }, [data, ensureDefaultEmployee, orgId, runOneLoopNow]);
 
   if (data === undefined || !authLoaded) return <LoadingDashboard />;
 
@@ -439,6 +441,9 @@ export function TalonDashboard() {
                             });
                             setSelection({
                               orgId,
+                              employeeId: result.employeeId,
+                            });
+                            await runOneLoopNow({
                               employeeId: result.employeeId,
                             });
                           })
@@ -964,6 +969,9 @@ export function TalonDashboard() {
                           });
                           setSelection({
                             orgId,
+                            employeeId: result.employeeId,
+                          });
+                          await runOneLoopNow({
                             employeeId: result.employeeId,
                           });
                           setActivePage("overview");
